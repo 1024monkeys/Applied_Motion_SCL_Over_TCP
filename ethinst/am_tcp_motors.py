@@ -1,6 +1,7 @@
 import sys
 import time
 import os.path
+from threading import Timer
 from ethinst import EthernetInstrument
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -199,7 +200,8 @@ class EthernetAppliedMotionTCPMotor(EthernetInstrument):
             'type': 'float', 'read': True, 'write': True,
             'help': 'Sets or requests shaft speed for point-to-point move commands like \
             FL, FP, FS, FD, SH, etc.'
-            },
+            }
+
     }
 
     def __init__(
@@ -243,11 +245,23 @@ class EthernetAppliedMotionTCPMotor(EthernetInstrument):
             self.parameters[command] = {'value': 0, 'updated': False}
 
         EthernetInstrument.__init__(self, host, port=port, term='\r')
+
+        # Init the idle timer to keep the TCP socket alive (the motors will close any inactive
+        # TCP sockets after ~20 seconds.  This idle timeout is not configurable on the drives.
+        self._idle_timer = None
+        self.idle_timer_interval = 10
+        self.idle_timer_is_running = False
+        # Start the idle_timer
+        self.idle_timer_start()
         
     def send_scl_cmd(self, cmd, parse_char='=', strip=True, verbose=False):
         #  Applied Motion's SCL commands must all have the '\0x0\0x7' prefix opcode.
         if verbose:
             print("send_scl_cmd: cmd = %s" % str(cmd))
+
+        # If there's any activity sent to the motor drives, then turn off the idle_timer.
+        self.idle_timer_stop()
+
         resp = self.cmd(self.SCL_OPCODE + cmd, verbose=verbose)
         if verbose:
             print("send_scl_cmd: resp = %s" % str(resp))
@@ -266,6 +280,9 @@ class EthernetAppliedMotionTCPMotor(EthernetInstrument):
             resp = resp.strip()
         if verbose:
             print("send_scl_cmd: final resp = %s" % str(resp))
+
+        # start the idle timer
+        self.idle_timer_start()
         return resp
 
     def motor_read(self, command, verbose=False):
@@ -404,3 +421,26 @@ class EthernetAppliedMotionTCPMotor(EthernetInstrument):
             if resp > 0x7FFFFFFF:
                 resp = resp - 0x100000000
         return resp
+
+    #
+    #  Idle Timer Functions
+    #
+
+    def idle_update_stats(self):
+        self.update_motor_status()
+        return
+
+    def _idle_timer_run(self):
+        self.idle_timer_is_running = False
+        self.idle_timer_start()
+        self.idle_update_stats()
+
+    def idle_timer_start(self):
+        if not self.idle_timer_is_running:
+            self._idle_timer = Timer(self.idle_timer_interval, self._idle_timer_run)
+            self._idle_timer.start()
+            self.idle_timer_is_running = True
+
+    def idle_timer_stop(self):
+        self._idle_timer.cancel()
+        self.idle_timer_is_running = False
